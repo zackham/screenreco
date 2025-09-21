@@ -1,0 +1,13 @@
+# Build artifacts
+border-overlay
+button-window
+*.o
+
+# Generated protocol files
+*-protocol.c
+*-protocol.h
+
+# Temporary files
+*.swp
+*~
+.DS_Store

@@ -1,0 +1,161 @@
+#!/bin/bash
+
+# screenreco - Wayland screen recorder with visual feedback
+# Usage: screenreco [--with-audio]
+
+WITH_AUDIO=false
+if [ "$1" = "--with-audio" ]; then
+    WITH_AUDIO=true
+fi
+
+# Path to overlay binaries (will be in PATH after install)
+BORDER_BIN="${SCREENRECO_BORDER:-screenreco-border}"
+BUTTON_BIN="${SCREENRECO_BUTTONS:-screenreco-buttons}"
+
+# Check if we're already recording
+if pgrep -x wf-recorder > /dev/null; then
+    # Stop recording via hotkey
+    pkill -INT wf-recorder
+    
+    # Signal overlay to stop
+    touch /tmp/stop-screen-recorder-overlay
+    sleep 0.5
+    
+    # Kill overlay and button window if still running
+    pkill -f "screenreco-border"
+    pkill -f "screenreco-buttons"
+    
+    # Process hotkey stop (defaults to save)
+    if [ -f /tmp/current-recording-file ]; then
+        FILENAME=$(cat /tmp/current-recording-file)
+        rm /tmp/current-recording-file
+        
+        # Clean up any marker files
+        rm -f /tmp/stop-screen-recorder-overlay
+        rm -f /tmp/screen-recorder-cancel
+        rm -f /tmp/screen-recorder-save
+        
+        if [ -f "$FILENAME" ]; then
+            notify-send "Uploading..." "Recording stopped. Uploading to 0x0.st..." -t 3000 -i media-record
+            
+            # Upload to 0x0.st
+            UPLOAD_URL=$(curl -s -F "file=@$FILENAME" https://0x0.st)
+            
+            if [ $? -eq 0 ] && [ -n "$UPLOAD_URL" ]; then
+                # Copy URL to clipboard
+                echo -n "$UPLOAD_URL" | wl-copy
+                
+                # Show success notification
+                if [ -f /tmp/recording-has-audio ]; then
+                    AUDIO_MSG=" (with audio)"
+                    rm /tmp/recording-has-audio
+                else
+                    AUDIO_MSG=""
+                fi
+                
+                notify-send "Uploaded to 0x0.st" "Link copied to clipboard:
+$UPLOAD_URL$AUDIO_MSG" -t 5000 -i dialog-information
+                
+                # Log for reference
+                echo "[$(date)] $UPLOAD_URL - $FILENAME$AUDIO_MSG" >> ~/Videos/upload-links.log
+            else
+                notify-send "Upload Failed" "Recording saved locally at:
+$FILENAME" -t 5000 -u critical
+            fi
+        fi
+    fi
+else
+    # Create Videos directory if it doesn't exist
+    mkdir -p ~/Videos
+    
+    # Clean up any old marker files (ALWAYS clean these up before starting)
+    rm -f /tmp/screen-recorder-cancel /tmp/screen-recorder-save /tmp/stop-screen-recorder-overlay
+    
+    # Generate filename with timestamp
+    FILENAME="$HOME/Videos/screen-recording-$(date '+%Y-%m-%d-%H%M').mp4"
+    
+    # Save filename for later upload
+    echo "$FILENAME" > /tmp/current-recording-file
+    
+    # Get area selection
+    AREA=$(slurp)
+    
+    # Check if user cancelled selection
+    if [ -z "$AREA" ]; then
+        rm /tmp/current-recording-file
+        exit 1
+    fi
+    
+    # Start recording
+    if [ "$WITH_AUDIO" = true ]; then
+        wf-recorder -a -g "$AREA" -f "$FILENAME" &
+        echo "1" > /tmp/recording-has-audio
+    else
+        wf-recorder -g "$AREA" -f "$FILENAME" &
+    fi
+    
+    # Parse area for button positioning
+    AREA_X=$(echo "$AREA" | cut -d',' -f1)
+    AREA_Y=$(echo "$AREA" | cut -d',' -f2 | cut -d' ' -f1)
+    
+    # Launch the border overlay and button window separately
+    "$BORDER_BIN" "$AREA" &
+    "$BUTTON_BIN" "$AREA" &
+    
+    # Calculate position for buttons (right-aligned, above frame)
+    AREA_WIDTH=$(echo "$AREA" | cut -d' ' -f2 | cut -d'x' -f1)
+    BUTTON_X=$((AREA_X + AREA_WIDTH - 200))
+    BUTTON_Y=$((AREA_Y - 60))
+    if [ $BUTTON_Y -lt 0 ]; then BUTTON_Y=0; fi
+    
+    # Move the button window after a brief delay
+    (sleep 0.1 && hyprctl dispatch movewindowpixel exact "$BUTTON_X $BUTTON_Y",title:screen-recorder-controls) &
+    
+    # No notification for start
+    
+    # Wait for recording to stop (either by button click or hotkey)
+    wait
+    
+    # Process the result after recording stops
+    if [ -f /tmp/current-recording-file ]; then
+        FILENAME=$(cat /tmp/current-recording-file)
+        rm /tmp/current-recording-file
+        
+        # Check if user cancelled or saved
+        if [ -f /tmp/screen-recorder-cancel ]; then
+            rm /tmp/screen-recorder-cancel
+            rm /tmp/stop-screen-recorder-overlay
+            rm -f "$FILENAME"
+            # No notification for cancel
+        elif [ -f /tmp/screen-recorder-save ] || [ -f "$FILENAME" ]; then
+            rm -f /tmp/screen-recorder-save
+            rm -f /tmp/stop-screen-recorder-overlay
+            
+            if [ -f "$FILENAME" ]; then
+                notify-send "Uploading..." "Recording stopped. Uploading to 0x0.st..." -t 3000 -i media-record
+                
+                # Upload to 0x0.st
+                UPLOAD_URL=$(curl -s -F "file=@$FILENAME" https://0x0.st)
+                
+                if [ $? -eq 0 ] && [ -n "$UPLOAD_URL" ]; then
+                    echo -n "$UPLOAD_URL" | wl-copy
+                    
+                    if [ -f /tmp/recording-has-audio ]; then
+                        AUDIO_MSG=" (with audio)"
+                        rm /tmp/recording-has-audio
+                    else
+                        AUDIO_MSG=""
+                    fi
+                    
+                    notify-send "Uploaded to 0x0.st" "Link copied to clipboard:
+$UPLOAD_URL$AUDIO_MSG" -t 5000 -i dialog-information
+                    
+                    echo "[$(date)] $UPLOAD_URL - $FILENAME$AUDIO_MSG" >> ~/Videos/upload-links.log
+                else
+                    notify-send "Upload Failed" "Recording saved locally at:
+$FILENAME" -t 5000 -u critical
+                fi
+            fi
+        fi
+    fi
+fi
